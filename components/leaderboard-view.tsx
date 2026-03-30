@@ -1,16 +1,33 @@
 'use client'
 
 import { useCallback, useMemo, useState } from 'react'
+import dynamic from 'next/dynamic'
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import type { LeaderboardEntry, BenchmarkVersion } from '@/lib/types'
 import { PROVIDER_COLORS } from '@/lib/types'
 import { SimpleLeaderboard } from '@/components/simple-leaderboard'
-import { ScatterGraphs } from '@/components/scatter-graphs'
-import { TaskHeatmap } from '@/components/task-heatmap'
-import { ScoreDistribution } from '@/components/score-distribution'
-import { ModelRadar } from '@/components/model-radar'
+import { GraphSkeleton } from '@/components/graph-skeleton'
 import { LeaderboardHeader } from '@/components/leaderboard-header'
 import { KiloClawAdCard } from '@/components/kiloclaw-ad-card'
+
+// Lazy-load graph components to reduce initial bundle size
+// recharts is ~200KB and only needed when user views the graphs tab
+const ScatterGraphs = dynamic(
+  () => import('@/components/scatter-graphs'),
+  { ssr: false, loading: () => <GraphSkeleton /> }
+)
+const TaskHeatmap = dynamic(
+  () => import('@/components/task-heatmap'),
+  { ssr: false, loading: () => <GraphSkeleton /> }
+)
+const ScoreDistribution = dynamic(
+  () => import('@/components/score-distribution'),
+  { ssr: false, loading: () => <GraphSkeleton /> }
+)
+const ModelRadar = dynamic(
+  () => import('@/components/model-radar'),
+  { ssr: false, loading: () => <GraphSkeleton /> }
+)
 
 type ViewMode = 'success' | 'speed' | 'cost' | 'value' | 'graphs'
 type ScoreMode = 'best' | 'average'
