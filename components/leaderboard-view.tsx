@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams, useRouter, usePathname } from 'next/navigation'
 import type { LeaderboardEntry, BenchmarkVersion } from '@/lib/types'
 import { PROVIDER_COLORS } from '@/lib/types'
@@ -15,6 +15,12 @@ import { KiloClawAdCard } from '@/components/kiloclaw-ad-card'
 type ViewMode = 'success' | 'speed' | 'cost' | 'value' | 'graphs'
 type ScoreMode = 'best' | 'average'
 type GraphSubTab = 'scatter' | 'heatmap' | 'distribution' | 'radar'
+
+function parseCategoriesParam(raw: string | null): string[] {
+    if (!raw?.trim()) return []
+    const parts = raw.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+    return [...new Set(parts)]
+}
 
 const VALID_VIEWS: ViewMode[] = ['success', 'speed', 'cost', 'value', 'graphs']
 const VALID_SCORE_MODES: ScoreMode[] = ['best', 'average']
@@ -45,6 +51,7 @@ export function LeaderboardView({ entries, lastUpdated, versions, currentVersion
     const initialGraphTab = VALID_GRAPH_TABS.includes(searchParams.get('graph') as GraphSubTab)
         ? (searchParams.get('graph') as GraphSubTab)
         : 'scatter'
+    const initialModelSearch = searchParams.get('model') || ''
 
     const [view, setViewState] = useState<ViewMode>(initialView)
     const [officialOnlyState, setOfficialOnlyState] = useState<boolean>(officialOnly)
@@ -52,6 +59,9 @@ export function LeaderboardView({ entries, lastUpdated, versions, currentVersion
     const [providerFilter, setProviderFilterState] = useState<string | null>(initialProvider)
     const [openWeightsOnly, setOpenWeightsOnlyState] = useState<boolean>(initialOpenWeights)
     const [graphSubTab, setGraphSubTabState] = useState<GraphSubTab>(initialGraphTab)
+    // Hidden providers — managed here so Header counts stay in sync with graph legend toggles
+    const [hiddenProviders, setHiddenProviders] = useState<Set<string>>(new Set())
+    const [modelSearch, setModelSearchState] = useState<string>(initialModelSearch)
 
     // Helper to update URL params without full page reload
     const updateUrl = useCallback((updates: Record<string, string | null>) => {
@@ -95,35 +105,87 @@ export function LeaderboardView({ entries, lastUpdated, versions, currentVersion
         updateUrl({ graph: t === 'scatter' ? null : t })
     }, [updateUrl])
 
+    const handleModelSearchChange = useCallback((s: string) => {
+        setModelSearchState(s)
+        updateUrl({ model: s || null })
+    }, [updateUrl])
+
     const setOfficialOnly = useCallback((v: boolean) => {
         setOfficialOnlyState(v)
         updateUrl({ official: v ? null : 'false' })
     }, [updateUrl])
 
-    const filteredEntries = useMemo(() => {
-        let result = entries
-        if (providerFilter) {
-            result = result.filter(
-                (entry) => entry.provider.toLowerCase() === providerFilter.toLowerCase()
-            )
-        }
-        if (openWeightsOnly) {
-            result = result.filter((entry) => entry.weights === 'Open')
-        }
-        return result
+    // Business-level filters only (provider filter, open weights).
+    // Used for legend provider list and all charts/tables.
+    const businessFilteredEntries = useMemo(() => {
+        return entries.filter(entry => {
+            if (providerFilter && entry.provider.toLowerCase() !== providerFilter.toLowerCase()) return false
+            if (openWeightsOnly && entry.weights !== 'Open') return false
+            return true
+        })
     }, [entries, providerFilter, openWeightsOnly])
+    const selectedCategories = useMemo(
+        () => parseCategoriesParam(searchParams.get('categories')),
+        [searchParams]
+    )
+
+    const setSelectedCategories = useCallback((cats: string[]) => {
+        const normalized = [...new Set(cats.map((c) => c.trim().toLowerCase()).filter(Boolean))]
+        updateUrl({ categories: normalized.length ? normalized.join(',') : null })
+    }, [updateUrl])
+
+    const filteredEntries = useMemo(() => {
+        return entries.filter(entry => {
+            if (providerFilter && entry.provider.toLowerCase() !== providerFilter.toLowerCase()) return false
+            if (openWeightsOnly && entry.weights !== 'Open') return false
+            if (modelSearch && !entry.model.toLowerCase().includes(modelSearch.toLowerCase())) return false
+            return true
+        })
+    }, [entries, providerFilter, openWeightsOnly, modelSearch])
+
+    // Scatter-visible entries: business filters + legend-hidden providers.
+    // Used only for scatter graph: chart dots and header totalRuns.
+    const scatterVisibleEntries = useMemo(() => {
+        return businessFilteredEntries.filter(entry =>
+            !hiddenProviders.has(entry.provider.toLowerCase())
+        )
+    }, [businessFilteredEntries, hiddenProviders])
+
+    // When business filters change, prune hiddenProviders to remove providers
+    // that are no longer present (e.g. after changing provider filter or open-weights).
+    const prevBusinessFiltersRef = useRef({ providerFilter, openWeightsOnly })
+    useEffect(() => {
+        const prev = prevBusinessFiltersRef.current
+        if (prev.providerFilter !== providerFilter || prev.openWeightsOnly !== openWeightsOnly) {
+            prevBusinessFiltersRef.current = { providerFilter, openWeightsOnly }
+            const currentProviders = new Set(businessFilteredEntries.map(e => e.provider.toLowerCase()))
+            setHiddenProviders(prev => {
+                const pruned = new Set([...prev].filter(k => currentProviders.has(k)))
+                return pruned.size === prev.size ? prev : pruned
+            })
+        }
+    }, [providerFilter, openWeightsOnly, businessFilteredEntries])
 
     const providerColor = providerFilter
         ? PROVIDER_COLORS[providerFilter.toLowerCase()] || '#666'
         : undefined
 
+    // Which entries to show in the Header stats:
+    // - In scatter graph view: use scatterVisibleEntries (excludes legend-hidden providers)
+    // - Otherwise: use businessFilteredEntries (legend-hidden providers don't affect totals)
+    const headerEntries =
+        view === 'graphs' && graphSubTab === 'scatter' ? scatterVisibleEntries : businessFilteredEntries
+
     const totalRuns = useMemo(() => {
-        return filteredEntries.reduce((sum, entry) => sum + (entry.submission_count ?? 0), 0)
-    }, [filteredEntries])
+        return headerEntries.reduce((sum, entry) => sum + (entry.submission_count ?? 0), 0)
+    }, [headerEntries])
+    const totalRuns = entries.reduce((acc, entry) => acc + (entry.submission_count || 1), 0)
 
     return (
         <div className="min-h-screen bg-background">
             <LeaderboardHeader
+                filteredEntryCount={headerEntries.length}
+                entries={entries}
                 filteredEntryCount={filteredEntries.length}
                 totalRuns={totalRuns}
                 versions={versions}
@@ -140,6 +202,8 @@ export function LeaderboardView({ entries, lastUpdated, versions, currentVersion
                 onOfficialOnlyChange={setOfficialOnly}
                 onOpenWeightsOnlyChange={setOpenWeightsOnly}
                 onClearProviderFilter={() => setProviderFilter(null)}
+                onModelSearchChange={handleModelSearchChange}
+                modelSearchValue={modelSearch}
             />
 
             <main className="max-w-7xl mx-auto px-6 py-8">
@@ -167,23 +231,33 @@ export function LeaderboardView({ entries, lastUpdated, versions, currentVersion
                         </div>
 
                         {graphSubTab === 'scatter' && (
-                            <ScatterGraphs entries={filteredEntries} scoreMode={scoreMode} />
+                            <ScatterGraphs
+                                entries={businessFilteredEntries}
+                                scoreMode={scoreMode}
+                                hiddenProviders={hiddenProviders}
+                                onHiddenProvidersChange={setHiddenProviders}
+                            />
                         )}
                         {graphSubTab === 'heatmap' && (
-                            <TaskHeatmap entries={filteredEntries} scoreMode={scoreMode} />
+                            <TaskHeatmap entries={businessFilteredEntries} scoreMode={scoreMode} />
+                            <TaskHeatmap
+                                entries={filteredEntries}
+                                selectedCategories={selectedCategories}
+                                onCategoriesChange={setSelectedCategories}
+                            />
                         )}
                         {graphSubTab === 'distribution' && (
-                            <ScoreDistribution entries={filteredEntries} scoreMode={scoreMode} currentVersion={currentVersion} officialOnly={officialOnlyState} />
+                            <ScoreDistribution entries={businessFilteredEntries} scoreMode={scoreMode} currentVersion={currentVersion} officialOnly={officialOnlyState} />
                         )}
                         {graphSubTab === 'radar' && (
-                            <ModelRadar entries={filteredEntries} scoreMode={scoreMode} />
+                            <ModelRadar entries={businessFilteredEntries} scoreMode={scoreMode} />
                         )}
 
                         <KiloClawAdCard />
                     </div>
                 ) : (
                     <SimpleLeaderboard
-                        entries={filteredEntries}
+                        entries={businessFilteredEntries}
                         view={view as 'success' | 'speed' | 'cost' | 'value'}
                         scoreMode={scoreMode}
                         benchmarkVersion={currentVersion}
